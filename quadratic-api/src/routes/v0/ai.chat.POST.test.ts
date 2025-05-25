@@ -1,0 +1,107 @@
+import { getModelFromModelKey } from 'quadratic-shared/ai/helpers/model.helper';
+import type { AIRequestBody } from 'quadratic-shared/typesAndSchemasAI';
+import request from 'supertest';
+import { app } from '../../app';
+import { clearDb, createFile, createTeam, createUser } from '../../tests/testDataGenerator';
+
+const auth0Id = 'user';
+
+const payload: AIRequestBody = {
+  chatId: '00000000-0000-0000-0000-000000000000',
+  fileUuid: '11111111-1111-1111-1111-111111111111',
+  source: 'AIAnalyst',
+  modelKey: 'bedrock-anthropic:claude:thinking-toggle-off',
+  messages: [
+    {
+      role: 'user',
+      content: [{ type: 'text', text: 'Hello' }],
+      contextType: 'userPrompt',
+    },
+  ],
+  useStream: false,
+  toolName: undefined,
+  useToolsPrompt: false,
+  language: undefined,
+  useQuadraticContext: false,
+};
+
+jest.mock('@anthropic-ai/bedrock-sdk', () => ({
+  AnthropicBedrock: jest.fn().mockImplementation(() => ({
+    messages: {
+      create: jest.fn().mockResolvedValue({
+        id: 'msg_mock123',
+        content: [
+          {
+            type: 'text',
+            text: 'This is a mocked response from Claude',
+          },
+          {
+            type: 'tool_use',
+            id: 'tool_123',
+            name: 'example_tool',
+            input: { param1: 'value1' },
+          },
+        ],
+      }),
+    },
+  })),
+}));
+
+beforeAll(async () => {
+  const user = await createUser({ auth0Id });
+  const team = await createTeam({ users: [{ userId: user.id, role: 'OWNER' }] });
+  await createFile({
+    data: {
+      uuid: payload.fileUuid,
+      name: 'Untitled',
+      ownerTeamId: team.id,
+      creatorUserId: user.id,
+    },
+  });
+});
+
+afterAll(clearDb);
+
+describe('POST /v0/ai/chat', () => {
+  describe('authentication', () => {
+    it('responds with a 401 when the token is invalid', async () => {
+      await request(app)
+        .post('/v0/ai/chat')
+        .send({ ...payload, chatId: '00000000-0000-0000-0000-000000000001' })
+        .set('Authorization', `Bearer InvalidToken user`)
+        .expect(401);
+    });
+
+    it('responds with model response when the token is valid', async () => {
+      await request(app)
+        .post('/v0/ai/chat')
+        .send({ ...payload, chatId: '00000000-0000-0000-0000-000000000002' })
+        .set('Authorization', `Bearer ValidToken user`)
+        .expect(200)
+        .expect(({ body }) => {
+          expect(body).toEqual({
+            role: 'assistant',
+            content: [
+              {
+                type: 'text',
+                text: 'This is a mocked response from Claude',
+              },
+            ],
+            contextType: 'userPrompt',
+            toolCalls: [
+              {
+                id: 'tool_123',
+                name: 'example_tool',
+                arguments: JSON.stringify({ param1: 'value1' }),
+                loading: false,
+              },
+            ],
+            model: getModelFromModelKey(payload.modelKey),
+          });
+        });
+
+      // wait for the chat to be saved
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+  });
+});

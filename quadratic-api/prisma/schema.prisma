@@ -1,0 +1,303 @@
+generator client {
+    provider      = "prisma-client-js"
+    binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    id              Int               @id @default(autoincrement())
+    auth0Id         String            @unique @map("auth0_id")
+    eduStatus       EduStatus?        @map("edu_status")
+    ownedFiles      File[]            @relation(name: "OwnerRelation")
+    createdFiles    File[]            @relation(name: "CreatorRelation")
+    QFeedback       QFeedback[]
+    UserTeamRole    UserTeamRole[]
+    UserFileRole    UserFileRole[]
+    AnalyticsAIChat AnalyticsAIChat[]
+
+    @@index([auth0Id])
+}
+
+enum EduStatus {
+    INELIGIBLE
+    // ELIGIBLE
+    ENROLLED
+    // NOT_ENROLLED
+}
+
+enum LinkPermission {
+    NOT_SHARED
+    READONLY
+    EDIT
+}
+
+// TODO Properly configure camelCase <-> snake_case
+model File {
+    id          Int       @id @default(autoincrement())
+    uuid        String    @unique @default(uuid())
+    name        String
+    thumbnail   String? // S3FileKey
+    createdDate DateTime  @default(now()) @map("created_date")
+    updatedDate DateTime  @default(now()) @map("updated_date")
+    deleted     Boolean   @default(false)
+    deletedDate DateTime? @map("deleted_date")
+    // Binary file contents
+    contents    Bytes? // unused to delete
+
+    // This is recorded when the file is created and never changes after that
+    creator       User @relation(name: "CreatorRelation", fields: [creatorUserId], references: [id])
+    creatorUserId Int  @map("creator_user_id")
+
+    // This is where we differentiate between who owns a file: an individual
+    // user or a team. These two are mutually exclusive, i.e. you should only
+    // ever have an `owner` or `team` but never both.
+    //
+    // This allows files to be "moved" between individual users, from a team to
+    // a user, or a user to a team.
+    ownerUser   User? @relation(name: "OwnerRelation", fields: [ownerUserId], references: [id])
+    ownerUserId Int?
+    ownerTeam   Team  @relation(fields: [ownerTeamId], references: [id])
+    ownerTeamId Int   @map("owner_team_id")
+
+    publicLinkAccess LinkPermission    @default(NOT_SHARED) @map("public_link_access")
+    times_updated    Int               @default(1) // unused to delete
+    version          String? // unused to delete
+    FileCheckpoint   FileCheckpoint[]
+    UserFileRole     UserFileRole[]
+    FileInvite       FileInvite[]
+    AnalyticsAIChat  AnalyticsAIChat[]
+
+    @@index([uuid])
+    @@index([ownerTeamId])
+    @@index([id, ownerTeamId])
+}
+
+model FileCheckpoint {
+    // Unique Identifiers
+    id             Int      @id @default(autoincrement())
+    file           File     @relation(fields: [fileId], references: [id])
+    fileId         Int      @map("file_id")
+    sequenceNumber Int      @map("sequence_number")
+    // Checkpoint Data
+    s3Bucket       String   @map("s3_bucket")
+    s3Key          String   @map("s3_key")
+    version        String // Quadratic file version
+    // Metadata
+    timestamp      DateTime @default(now())
+
+    @@unique([fileId, sequenceNumber])
+    @@index([fileId, sequenceNumber])
+}
+
+enum SubscriptionStatus {
+    TRIALING
+    ACTIVE
+    INCOMPLETE
+    INCOMPLETE_EXPIRED
+    PAST_DUE
+    CANCELED
+    UNPAID
+    PAUSED
+}
+
+model Team {
+    id           Int            @id @default(autoincrement())
+    uuid         String         @unique @default(uuid())
+    name         String
+    picture      String? // S3FileKey
+    createdDate  DateTime       @default(now()) @map("created_date")
+    UserTeamRole UserTeamRole[]
+    TeamInvite   TeamInvite[]
+    File         File[]
+    Connection   Connection[]
+
+    // Billing
+    stripeCustomerId              String?             @unique @map("stripe_customer_id")
+    stripeSubscriptionId          String?             @unique @map("stripe_subscription_id")
+    stripeSubscriptionStatus      SubscriptionStatus? @map("stripe_subscription_status")
+    stripeCurrentPeriodEnd        DateTime?           @map("stripe_current_period_end")
+    stripeSubscriptionLastUpdated DateTime?           @map("stripe_subscription_last_updated")
+
+    // Key/value storage used by Quadratic client on the Team.
+    // It remembers things like closing the onboarding banner.
+    // Use for client-specific data that is not useful to the server or other services
+    clientDataKv Json @default("{}") @map("client_data_kv")
+
+    // Settings
+    settingAnalyticsAi Boolean @default(true) @map("setting_analytics_ai")
+
+    // SSH Keys
+    sshPrivateKey Bytes?
+    sshPublicKey  Bytes?
+
+    @@index([uuid])
+}
+
+enum TeamRole {
+    OWNER
+    EDITOR
+    VIEWER
+}
+
+enum ConnectionType {
+    POSTGRES
+    MYSQL
+    MSSQL
+    SNOWFLAKE
+}
+
+model Connection {
+    // Generic details
+    id          Int       @id @default(autoincrement())
+    uuid        String    @unique @default(uuid()) // used in URLs
+    createdDate DateTime  @default(now()) @map("created_date")
+    updatedDate DateTime  @default(now()) @map("updated_date")
+    archived    DateTime?
+    name        String
+    team        Team      @relation(fields: [teamId], references: [id])
+    teamId      Int       @map("team_id")
+    // secretArn       String // AWS Secret Manager ARN
+
+    // Type-specific details
+    type        ConnectionType
+    typeDetails Bytes // InitializationVector:Cyphertext(JSON)
+}
+
+model UserTeamRole {
+    id          Int      @id @default(autoincrement())
+    userId      Int      @map("user_id")
+    teamId      Int      @map("team_id")
+    user        User     @relation(fields: [userId], references: [id])
+    team        Team     @relation(fields: [teamId], references: [id])
+    role        TeamRole
+    createdDate DateTime @default(now()) @map("created_date")
+
+    @@unique([userId, teamId])
+}
+
+model TeamInvite {
+    id          Int      @id @default(autoincrement())
+    email       String
+    teamId      Int      @map("team_id")
+    team        Team     @relation(fields: [teamId], references: [id])
+    role        TeamRole
+    createdDate DateTime @default(now()) @map("created_date")
+
+    @@unique([email, teamId])
+}
+
+enum FileRole {
+    // There is only ever 1 owner per file which is stored on the file itself
+    EDITOR
+    VIEWER
+}
+
+model UserFileRole {
+    id          Int      @id @default(autoincrement())
+    userId      Int      @map("user_id")
+    fileId      Int      @map("file_id")
+    user        User     @relation(fields: [userId], references: [id])
+    file        File     @relation(fields: [fileId], references: [id])
+    role        FileRole
+    createdDate DateTime @default(now()) @map("created_date")
+
+    @@unique([userId, fileId])
+}
+
+model FileInvite {
+    id          Int      @id @default(autoincrement())
+    email       String
+    fileId      Int      @map("file_id")
+    file        File     @relation(fields: [fileId], references: [id])
+    role        FileRole
+    createdDate DateTime @default(now()) @map("created_date")
+
+    @@unique([email, fileId])
+}
+
+// Future: folders
+// model Folder {
+//     id             Int      @id @default(autoincrement())
+//     uuid           String   @unique @default(uuid())
+//     name           String
+//     createdDate    DateTime @default(now()) @map("created_date")
+//     createdBy      User     @relation(fields: [createByUserId], references: [id])
+//     createByUserId Int      @map("created_by_user_id")
+//     team           Team?    @relation(fields: [teamId], references: [id])
+// }
+// enum FolderRole {}
+// model UserFolderRole {}
+
+model QFeedback {
+    id           Int      @id @default(autoincrement())
+    feedback     String
+    created_date DateTime @default(now())
+    userId       Int?
+    user         User?    @relation(fields: [userId], references: [id])
+}
+
+model AnalyticsAIChat {
+    id          Int                      @id @default(autoincrement())
+    userId      Int                      @map("user_id")
+    user        User                     @relation(fields: [userId], references: [id])
+    fileId      Int                      @map("file_id")
+    file        File                     @relation(fields: [fileId], references: [id])
+    chatId      String                   @unique @map("chat_id")
+    source      AIChatSource
+    messages    AnalyticsAIChatMessage[]
+    createdDate DateTime                 @default(now()) @map("created_date")
+    updatedDate DateTime                 @default(now()) @map("updated_date")
+
+    @@index([chatId])
+    @@index([userId])
+    @@index([fileId])
+    @@index([source])
+    @@index([createdDate])
+    @@index([userId, source, createdDate])
+}
+
+enum AIChatSource {
+    AIAssistant              @map("ai_assistant")
+    AIAnalyst                @map("ai_analyst")
+    AIResearcher             @map("ai_researcher")
+    GetChatName              @map("get_chat_name")
+    GetFileName              @map("get_file_name")
+    CodeEditorCompletions    @map("code_editor_completions")
+    GetUserPromptSuggestions @map("get_user_prompt_suggestions")
+    PDFImport                @map("pdf_import")
+}
+
+enum AIChatMessageType {
+    userPrompt @map("user_prompt")
+    toolResult @map("tool_result")
+}
+
+model AnalyticsAIChatMessage {
+    id               Int                @id @default(autoincrement())
+    chatId           Int                @map("chat_id")
+    chat             AnalyticsAIChat    @relation(fields: [chatId], references: [id])
+    model            String
+    messageIndex     Int                @map("message_index")
+    messageType      AIChatMessageType? @map("message_type")
+    s3Key            String?            @map("s3_key")
+    like             Boolean?
+    undo             Boolean?
+    codeRunError     String?            @map("code_run_error")
+    responseError    String?            @map("response_error")
+    inputTokens      Int?               @map("input_tokens")
+    outputTokens     Int?               @map("output_tokens")
+    cacheReadTokens  Int?               @map("cache_read_tokens")
+    cacheWriteTokens Int?               @map("cache_write_tokens")
+    createdDate      DateTime           @default(now()) @map("created_date")
+    updatedDate      DateTime           @default(now()) @map("updated_date")
+
+    @@unique([chatId, messageIndex], name: "chatId_messageIndex")
+    @@index([chatId, messageType])
+    @@index([chatId, messageIndex])
+    @@index([chatId])
+    @@index([model])
+}

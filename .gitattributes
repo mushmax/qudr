@@ -1,2 +1,3 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Do not include vendor files in GitHub Languages analysis
+public/monaco/** linguist-vendored
+public/pyodide/** linguist-vendored
